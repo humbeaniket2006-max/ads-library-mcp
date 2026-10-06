@@ -1,0 +1,23 @@
+[project]
+name = "meta-ads-library-mcp"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM"]
+ignore = ["S101", "S311", "S105", "S106"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/models.py" = ["E501"]
+"app/fixtures.py" = ["E501"]
+"tests/*" = ["S105", "S106", "S107", "B011", "E501", "SIM905"]
