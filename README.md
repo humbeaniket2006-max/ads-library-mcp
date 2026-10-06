@@ -99,7 +99,11 @@ allowed hosts at runtime, so no hostname is hard-coded.
   and daily budgets are scaled by `COLD_START_BUDGET_FACTOR` (default 0.5). Meta's own `X-App-Usage` reading on the first
   call corrects for usage the restart forgot.
 - **750 instance hours per month** per workspace on the free plan, one instance, no persistent disk.
-- There is deliberately **no keep-alive or self-ping**.
+- **Keep-alive (optional):** `.github/workflows/keep-awake.yml` pings `/healthz` every 7 minutes so the instance rarely
+  sleeps. One always-on service uses about 744 of the 750 free hours per month, so it leaves almost no headroom for a second
+  free service. It is external to the app (no self-ping loop). GitHub may delay scheduled runs, and disables scheduled
+  workflows after 60 days without repo activity. Delete the file to go back to sleeping when idle. A sleeping instance
+  still resets the cache and budgets, so keeping it awake also keeps them.
 - **Move to a paid plan:** in `render.yaml`, change `plan: free` to `plan: starter` (the commented line shows where), commit,
   and push. Do this when the team uses it daily or the cold start gets in the way.
 
