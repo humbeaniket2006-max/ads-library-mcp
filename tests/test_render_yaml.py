@@ -102,35 +102,43 @@ def test_oauth_vars_declared_without_hardcoded_secrets(svc):
     env = {e["key"]: e for e in svc["envVars"]}
     for key in ("OAUTH_SIGNING_KEY", "MCP_OAUTH_CLIENT_SECRET"):
         assert env[key] == {"key": key, "generateValue": True}
-    for key in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "ALLOWED_EMAILS", "ALLOWED_EMAIL_DOMAINS"):
-        assert env[key] == {"key": key, "sync": False}  # personal data and secrets never live in git
     assert "value" in env["MCP_OAUTH_CLIENT_ID"] and "GOCSPX" not in (ROOT / "render.yaml").read_text()
+    for gone in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "ALLOWED_EMAILS", "ALLOWED_EMAIL_DOMAINS"):
+        assert gone not in env  # Google sign-in is not part of the Blueprint
     assert env["MCP_AUTH_MODE"]["value"] == "path_secret"  # existing deploys keep working until you opt in
     assert "PUBLIC_BASE_URL" not in env  # derived from RENDER_EXTERNAL_URL
 
 
-def test_blueprint_boots_in_oauth_mode_and_declares_every_required_var(svc):
+def test_blueprint_boots_in_oauth_client_mode_with_no_manual_values(svc):
+    """The simple path (client ID + secret, no Google): Render's own generated values are enough."""
     env = {"RENDER_EXTERNAL_HOSTNAME": "svc.onrender.com", "RENDER_EXTERNAL_URL": "https://svc.onrender.com"}
     for e in svc["envVars"]:
         if "value" in e:
             env[e["key"]] = e["value"]
         elif e.get("generateValue"):
             env[e["key"]] = base64.b64encode(secrets.token_bytes(32)).decode()
-    env["MCP_AUTH_MODE"] = "path_secret,oauth"
-    # what the owner enters for the sync:false variables when switching OAuth on
-    env.update(GOOGLE_OAUTH_CLIENT_ID="x.apps.googleusercontent.com", GOOGLE_OAUTH_CLIENT_SECRET="GOCSPX-" + "a" * 28,
-               ALLOWED_EMAILS="me@example.com")
+        # sync:false variables stay blank
+    env["MCP_AUTH_MODE"] = "path_secret,oauth_client"
     s = Settings.load(env)
-    assert "oauth" in s.auth_modes and s.public_base_url == "https://svc.onrender.com"
-    assert "svc.onrender.com" in s.allowed_hosts
+    assert s.oauth_client_login and not s.oauth_login and s.oauth_client_id == "claude-meta-ads"
+    assert s.public_base_url == "https://svc.onrender.com"
 
+
+def test_blueprint_declares_every_var_oauth_client_mode_requires(svc):
+    env = {"RENDER_EXTERNAL_HOSTNAME": "svc.onrender.com", "RENDER_EXTERNAL_URL": "https://svc.onrender.com"}
+    for e in svc["envVars"]:
+        if "value" in e:
+            env[e["key"]] = e["value"]
+        elif e.get("generateValue"):
+            env[e["key"]] = base64.b64encode(secrets.token_bytes(32)).decode()
+    env["MCP_AUTH_MODE"] = "path_secret,oauth_client"
+    Settings.load(env)
     required = set()
     for key in list(env):
-        trial = {k: v for k, v in env.items() if k != key}
         try:
-            Settings.load(trial)
+            Settings.load({k: v for k, v in env.items() if k != key})
         except Exception:
             required.add(key)
     declared = {e["key"] for e in svc["envVars"]} | PLATFORM_PROVIDED
     assert required <= declared, required - declared
-    assert {"OAUTH_SIGNING_KEY", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"} <= required
+    assert {"OAUTH_SIGNING_KEY", "MCP_OAUTH_CLIENT_ID", "MCP_OAUTH_CLIENT_SECRET"} <= required

@@ -33,7 +33,14 @@ secret URL path or labelled bearer keys. The server is read-only and only ever c
   hash of the query text. No ad content, tokens or query text.
 - **Supply chain:** all dependencies pinned; `pip-audit` runs in CI.
 
-## OAuth mode (`MCP_AUTH_MODE` includes `oauth`)
+## OAuth client mode (`oauth_client`)
+
+No user login: the pre-registered client's secret is the only credential. `/authorize` auto-approves just that client, the
+code is redeemable only with the client secret and PKCE verifier at `/token`, and open registration is disabled. Tokens
+carry a fingerprint of the secret, so rotating `MCP_OAUTH_CLIENT_SECRET` invalidates them. There is one shared identity, so
+there is no per-person revocation; use `oauth` for that.
+
+## OAuth mode with Google sign-in (`oauth`)
 
 - **Built on the MCP SDK's authorization-server framework** with PyJWT (HS256, a derived key and `typ` per purpose, so a
   refresh token can never be used as an access token, and so on). No hand-rolled crypto.

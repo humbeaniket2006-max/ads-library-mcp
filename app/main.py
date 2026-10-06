@@ -296,14 +296,14 @@ def create_app(settings: Settings | None = None) -> Gateway:
     svc = Service(s)
     hosts = [*s.allowed_hosts, *[f"{h}:*" for h in s.allowed_hosts if ":" not in h]]
     oauth = None
-    if "oauth" in s.auth_modes:
+    if s.oauth_enabled:
         from .oauth.google import GoogleClient
         from .oauth.provider import OAuthProvider
         from .oauth.routes import OAuthRuntime
         from .oauth.tokens import TokenCodec
 
         codec = TokenCodec(s.oauth_signing_key, s.public_base_url)
-        google = GoogleClient(s.google_client_id, s.google_client_secret)
+        google = GoogleClient(s.google_client_id, s.google_client_secret) if s.oauth_login else None
         oauth = OAuthRuntime(s, codec, OAuthProvider(s, codec), google)
     inner = build_server(svc, oauth).streamable_http_app(
         stateless_http=True, json_response=True, streamable_http_path="/mcp",

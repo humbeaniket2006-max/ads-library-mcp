@@ -614,3 +614,181 @@ def test_email_policy():
     assert email_allowed("u@corp.example", "corp.example", emails, domains)
     assert not email_allowed("u@corp.example", None, emails, domains)
     assert not email_allowed("nonsense", "corp.example", emails, domains)
+
+
+# =========================================================================================================
+# oauth_client mode: no Google, no user login. The pre-registered client ID + secret is the credential.
+# =========================================================================================================
+
+CLIENT_ONLY = {
+    "MCP_AUTH_MODE": "oauth_client", "GOOGLE_OAUTH_CLIENT_ID": "", "GOOGLE_OAUTH_CLIENT_SECRET": "",
+    "ALLOWED_EMAILS": "", "ALLOWED_EMAIL_DOMAINS": "",
+}
+
+
+async def client_login(flow, *, auth="post", redirect_uri=CLAUDE_CB, state="st-1", client_id=STATIC_ID,
+                       secret=STATIC_SECRET, resource=RESOURCE, verifier_override=None):
+    import base64
+    from urllib.parse import parse_qs, urlsplit
+
+    verifier, challenge = flow.pkce()
+    a = await flow.authorize(client_id, redirect_uri, challenge=challenge, state=state, resource=resource)
+    out = {"authorize": a, "verifier": verifier}
+    if a.status_code != 302:
+        return out
+    q = parse_qs(urlsplit(a.headers["location"]).query)
+    out["query"] = q
+    if "code" not in q:
+        return out
+    form = {"grant_type": "authorization_code", "code": q["code"][0], "redirect_uri": redirect_uri,
+            "client_id": client_id, "code_verifier": verifier_override or verifier, "resource": resource}
+    headers = {}
+    if auth == "post":
+        form["client_secret"] = secret
+    elif auth == "basic":
+        headers["authorization"] = "Basic " + base64.b64encode(f"{client_id}:{secret}".encode()).decode()
+    t = await flow.http.post("/token", data=form, headers=headers)
+    out.update(token_response=t, code=q["code"][0])
+    if t.status_code == 200:
+        out["tokens"] = t.json()
+        flow.secrets += [out["tokens"]["access_token"], out["tokens"]["refresh_token"], q["code"][0]]
+    return out
+
+
+async def test_client_mode_needs_no_google_and_works_with_post_or_basic(stack, capsys):
+    app, flow, router = await stack(**CLIENT_ONLY)
+    for auth in ("post", "basic"):
+        res = await client_login(flow, auth=auth)
+        assert res["authorize"].headers["location"].startswith(CLAUDE_CB + "?code=")  # no consent, no Google
+        assert res["query"]["state"] == ["st-1"]
+        tokens = res["tokens"]
+        assert (await flow.mcp(tokens["access_token"])).status_code == 200
+    assert not any("google" in str(c.request.url) for c in router.calls)  # Google was never contacted
+    await flow.mcp(tokens["access_token"], "tools/call",
+                   {"name": "search_ads", "arguments": {"countries": ["DE"], "query": "Nordlicht"}})
+    out = capsys.readouterr().out
+    assert all(s not in out for s in flow.secrets) and STATIC_SECRET not in out
+    assert '"client":"u:' in out
+
+
+async def test_client_mode_secret_is_the_only_credential(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    none = await client_login(flow, auth="none")
+    assert none["token_response"].status_code == 401 and none["token_response"].json()["error"] == "invalid_client"
+    wrong = await client_login(flow, secret="w" * 40)
+    assert wrong["token_response"].status_code == 401
+    assert "tokens" in await client_login(flow)  # the right secret works
+
+
+async def test_client_mode_pkce_and_single_use(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    bad = await client_login(flow, verifier_override="x" * 60)
+    assert bad["token_response"].status_code == 400 and bad["token_response"].json()["error"] == "invalid_grant"
+    ok = await client_login(flow)
+    again = await flow.token(grant_type="authorization_code", code=ok["code"], client_id=STATIC_ID,
+                             client_secret=STATIC_SECRET, redirect_uri=CLAUDE_CB, code_verifier=ok["verifier"])
+    assert again.status_code == 400 and again.json()["error"] == "invalid_grant"
+    _, ch = flow.pkce()
+    plain = await flow.authorize(STATIC_ID, challenge=ch, method="plain")
+    assert "code=" not in plain.headers.get("location", "")
+
+
+async def test_client_mode_has_no_open_registration_or_login_pages(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    assert (await flow.register()).status_code in (404, 405)
+    _, ch = flow.pkce()
+    unknown = await flow.authorize("some-other-client", challenge=ch)
+    assert unknown.status_code == 400 and "location" not in unknown.headers
+    assert (await flow.http.get("/oauth/consent", params={"req": "x"})).status_code == 404
+    assert (await flow.http.get("/oauth/google/callback")).status_code == 404
+    asm = (await flow.http.get("/.well-known/oauth-authorization-server")).json()
+    assert "registration_endpoint" not in asm
+
+
+async def test_client_mode_redirect_and_resource_rules(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    _, ch = flow.pkce()
+    evil = await flow.authorize(STATIC_ID, "https://evil.example/cb", challenge=ch)
+    assert evil.status_code == 400 and "location" not in evil.headers
+    http_claude = await flow.authorize(STATIC_ID, "http://claude.ai/api/mcp/auth_callback", challenge=ch)
+    assert http_claude.status_code == 400
+    assert (await client_login(flow, redirect_uri="http://localhost:49152/callback"))["tokens"]
+    assert (await client_login(flow, redirect_uri="https://claude.com/api/mcp/auth_callback"))["tokens"]
+    wrong = await flow.authorize(STATIC_ID, challenge=ch, resource="https://evil.example/mcp")
+    assert "error=invalid_target" in wrong.headers["location"] and "code=" not in wrong.headers["location"]
+
+
+async def test_client_mode_refresh_rotation_restart_and_key_rotation(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    res = await client_login(flow)
+    at, rt = res["tokens"]["access_token"], res["tokens"]["refresh_token"]
+
+    def refresh(f, token, secret=STATIC_SECRET):
+        return f.token(grant_type="refresh_token", refresh_token=token, client_id=STATIC_ID, client_secret=secret)
+
+    r = await refresh(flow, rt)
+    assert r.status_code == 200 and r.json()["refresh_token"] != rt
+    assert (await refresh(flow, rt)).json()["error"] == "invalid_grant"  # rotation: the old one is dead
+    app2, flow2, _ = await stack(**CLIENT_ONLY)                           # restart
+    assert (await flow2.mcp(at)).status_code == 200
+    assert (await refresh(flow2, r.json()["refresh_token"])).status_code == 200
+    app3, flow3, _ = await stack(**CLIENT_ONLY, OAUTH_SIGNING_KEY="n" * 40)  # signing key rotated
+    assert (await flow3.mcp(at)).status_code == 401
+
+
+async def test_rotating_the_client_secret_revokes_tokens(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    res = await client_login(flow)
+    at, rt = res["tokens"]["access_token"], res["tokens"]["refresh_token"]
+    new_secret = "r" * 40
+    app2, flow2, _ = await stack(**CLIENT_ONLY, MCP_OAUTH_CLIENT_SECRET=new_secret)
+    assert (await flow2.mcp(at)).status_code == 401               # old access token no longer accepted
+    r = await flow2.token(grant_type="refresh_token", refresh_token=rt, client_id=STATIC_ID, client_secret=new_secret)
+    assert r.status_code == 400                                    # old refresh token no longer accepted
+    assert (await flow2.token(grant_type="refresh_token", refresh_token=rt, client_id=STATIC_ID,
+                              client_secret=STATIC_SECRET)).status_code == 401  # old secret no longer works
+    assert "tokens" in await client_login(flow2, secret=new_secret)
+
+
+async def test_client_identity_tokens_cannot_be_forged_without_the_secret_fingerprint(stack):
+    app, flow, _ = await stack(**CLIENT_ONLY)
+    codec = TokenCodec(SIGNING, BASE)  # even someone holding the signing key must also know the client secret
+    forged = codec.encode("access", 3600, audience=RESOURCE, sub=f"client:{STATIC_ID}", cid=STATIC_ID, sc="ads:read")
+    assert (await flow.mcp(forged)).status_code == 401
+    guessed = codec.encode("access", 3600, audience=RESOURCE, sub="alice@example.com", cid=STATIC_ID, sc="ads:read")
+    assert (await flow.mcp(guessed)).status_code == 401           # google identities are not accepted in this mode
+
+
+async def test_client_mode_combined_with_path_secret(stack):
+    secret = "p" * 40
+    app, flow, _ = await stack(**{**CLIENT_ONLY, "MCP_AUTH_MODE": "path_secret,oauth_client"}, MCP_PATH_SECRET=secret)
+    assert (await flow.mcp(None, path=f"/mcp/{secret}")).status_code == 200
+    assert (await flow.mcp(None)).status_code == 401
+    assert (await flow.mcp((await client_login(flow))["tokens"]["access_token"])).status_code == 200
+
+
+async def test_client_mode_combined_with_google_login(stack):
+    """oauth + oauth_client: the static client is auto-approved; dynamic clients still sign in with Google."""
+    app, flow, _ = await stack(MCP_AUTH_MODE="oauth,oauth_client")
+    assert "tokens" in await client_login(flow)
+    dyn = await flow.login()  # DCR client -> consent -> Google -> allowlist
+    assert "tokens" in dyn
+    denied = await flow.login("mallory@evil.example")
+    assert denied["final_query"]["error"] == ["access_denied"]
+
+
+@pytest.mark.parametrize("over", [
+    {"MCP_OAUTH_CLIENT_ID": "", "MCP_OAUTH_CLIENT_SECRET": ""},
+    {"MCP_OAUTH_CLIENT_ID": "only-id", "MCP_OAUTH_CLIENT_SECRET": ""},
+    {"MCP_OAUTH_CLIENT_SECRET": "short"},
+    {"OAUTH_SIGNING_KEY": "short"},
+    {"PUBLIC_BASE_URL": "http://app.example.com"},
+])
+def test_client_mode_config_fails_closed(over):
+    with pytest.raises(ConfigError):
+        Settings.load(oauth_env(**{**CLIENT_ONLY, **over}))
+
+
+def test_client_mode_needs_neither_google_nor_allowlists():
+    s = Settings.load(oauth_env(**CLIENT_ONLY))
+    assert s.oauth_client_login and not s.oauth_login and not s.google_client_id and not s.allowed_emails

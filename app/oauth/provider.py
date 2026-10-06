@@ -20,6 +20,7 @@ from mcp.server.auth.provider import (
     RefreshToken,
     RegistrationError,
     TokenError,
+    construct_redirect_uri,
 )
 from mcp.shared.auth import InvalidRedirectUriError, OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
@@ -64,11 +65,13 @@ class ClaudeClient(OAuthClientInformationFull):
 class _Code(AuthorizationCode):
     jti: str
     hd: str | None = None
+    cs: str | None = None
 
 
 class _Refresh(RefreshToken):
     jti: str
     hd: str | None = None
+    cs: str | None = None
 
 
 def user_hash(email: str) -> str:
@@ -86,8 +89,22 @@ class OAuthProvider:
         self.gateway_token = secrets.token_urlsafe(32)
 
     # -- policy -------------------------------------------------------------------------------
-    def permitted(self, email: str, hd: str | None) -> bool:
-        return email_allowed(email, hd, self.s.allowed_emails, self.s.allowed_email_domains)
+    @property
+    def static_identity(self) -> str:
+        return f"client:{self.s.oauth_client_id}"
+
+    def _fingerprint(self) -> str:
+        """Ties tokens to the current client secret, so rotating the secret also invalidates them."""
+        return self.codec.mac("client-secret", self.s.oauth_client_secret)[:16]
+
+    def permitted(self, email: str, hd: str | None, cs: str | None = None) -> bool:
+        if email == self.static_identity:  # client-credential identity (oauth_client mode)
+            return self.s.oauth_client_login and cs is not None and hmac.compare_digest(cs, self._fingerprint())
+        return self.s.oauth_login and email_allowed(email, hd, self.s.allowed_emails, self.s.allowed_email_domains)
+
+    def _is_static(self, client_id: str) -> bool:
+        sid = self.s.oauth_client_id
+        return bool(sid) and hmac.compare_digest(client_id.encode(), sid.encode())
 
     @staticmethod
     def _scopes(requested: list[str] | None) -> list[str]:
@@ -106,6 +123,8 @@ class OAuthProvider:
                 redirect_uris=[*CLAUDE_CALLBACKS, "http://localhost/callback", "http://127.0.0.1/callback"],
                 grant_types=GRANTS, response_types=["code"], scope=" ".join(VALID_SCOPES), client_name="Claude",
             )
+        if not self.s.oauth_login:  # no open registration unless users sign in
+            return None
         try:
             c = self.codec.decode("client", client_id)
         except BadToken:
@@ -141,6 +160,15 @@ class OAuthProvider:
         ru = str(params.redirect_uri)
         if not redirect_allowed(ru):
             raise AuthorizeError("invalid_request", "redirect_uri is not allowed")
+        if self.s.oauth_client_login and self._is_static(client.client_id):
+            # No user login in this mode. The code is useless without the client secret (checked at /token) and the
+            # PKCE verifier, so approving here does not hand anything to whoever opened the link.
+            req = {"cid": client.client_id, "ru": ru, "rue": params.redirect_uri_provided_explicitly,
+                   "cc": params.code_challenge, "sc": self._scopes(params.scopes)}
+            return construct_redirect_uri(ru, code=self.issue_code(req, self.static_identity, None),
+                                          state=params.state)
+        if not self.s.oauth_login:
+            raise AuthorizeError("unauthorized_client", "sign-in is not enabled for this client")
         req = self.codec.encode(
             "authreq", AUTHREQ_TTL, cid=client.client_id, ru=ru, rue=params.redirect_uri_provided_explicitly,
             cc=params.code_challenge, st=params.state, sc=self._scopes(params.scopes),
@@ -151,7 +179,7 @@ class OAuthProvider:
     def issue_code(self, req: dict, email: str, hd: str | None) -> str:
         return self.codec.encode(
             "code", self.s.oauth_code_ttl, cid=req["cid"], ru=req["ru"], rue=req["rue"], cc=req["cc"],
-            sc=req["sc"], em=email, hd=hd,
+            sc=req["sc"], em=email, hd=hd, cs=self._fingerprint() if email == self.static_identity else None,
         )
 
     async def load_authorization_code(self, client: OAuthClientInformationFull, authorization_code: str):
@@ -162,20 +190,22 @@ class OAuthProvider:
         return _Code(
             code=authorization_code, scopes=c["sc"], expires_at=c["exp"], client_id=c["cid"],
             code_challenge=c["cc"], redirect_uri=c["ru"], redirect_uri_provided_explicitly=c["rue"],
-            resource=self.resource, subject=c["em"], jti=c["jti"], hd=c.get("hd"),
+            resource=self.resource, subject=c["em"], jti=c["jti"], hd=c.get("hd"), cs=c.get("cs"),
         )
 
     async def exchange_authorization_code(self, client: OAuthClientInformationFull, authorization_code) -> OAuthToken:
         if not self.used.use(authorization_code.jti, authorization_code.expires_at):
             raise TokenError("invalid_grant", "authorization code was already used")
         email = authorization_code.subject or ""
-        if not self.permitted(email, authorization_code.hd):
+        if not self.permitted(email, authorization_code.hd, authorization_code.cs):
             raise TokenError("invalid_grant", "this account is not allowed")
         return self._issue_pair(email, authorization_code.hd, client.client_id, authorization_code.scopes)
 
     # -- tokens ---------------------------------------------------------------------------------
     def _issue_pair(self, email: str, hd: str | None, client_id: str, scopes: list[str]) -> OAuthToken:
         claims = {"sub": email, "hd": hd, "cid": client_id, "sc": " ".join(scopes)}
+        if email == self.static_identity:
+            claims["cs"] = self._fingerprint()
         access = self.codec.encode("access", self.s.oauth_access_ttl, audience=self.resource, **claims)
         refresh = self.codec.encode("refresh", self.s.oauth_refresh_ttl, audience=self.resource, **claims)
         return OAuthToken(access_token=access, expires_in=self.s.oauth_access_ttl, scope=" ".join(scopes),
@@ -186,10 +216,10 @@ class OAuthProvider:
             c = self.codec.decode("refresh", refresh_token, audience=self.resource)
         except BadToken:
             return None
-        if not self.permitted(c["sub"], c.get("hd")):
+        if not self.permitted(c["sub"], c.get("hd"), c.get("cs")):
             return None
         return _Refresh(token=refresh_token, client_id=c["cid"], scopes=c["sc"].split(), expires_at=c["exp"],
-                        resource=self.resource, subject=c["sub"], jti=c["jti"], hd=c.get("hd"))
+                        resource=self.resource, subject=c["sub"], jti=c["jti"], hd=c.get("hd"), cs=c.get("cs"))
 
     async def exchange_refresh_token(self, client, refresh_token, scopes: list[str]) -> OAuthToken:
         if not self.used.use(refresh_token.jti, refresh_token.expires_at or time.time()):
@@ -204,7 +234,7 @@ class OAuthProvider:
             c = self.codec.decode("access", token, audience=self.resource)
         except BadToken:
             return None
-        if not self.permitted(c["sub"], c.get("hd")):  # removing a user takes effect on their next request
+        if not self.permitted(c["sub"], c.get("hd"), c.get("cs")):  # removing a user takes effect on their next request
             return None
         h = user_hash(c["sub"])
         context.client_key.set(f"user:{h}")

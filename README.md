@@ -125,20 +125,57 @@ claude mcp add --transport http meta-ads https://<service>.onrender.com/mcp --he
 
 ### Auth modes
 
-`MCP_AUTH_MODE` takes one value or a comma list: `path_secret`, `bearer`, `oauth`, `both` (= `path_secret` + `bearer`, kept
-for compatibility), or a mix such as `path_secret,oauth`.
+`MCP_AUTH_MODE` takes one value or a comma list: `path_secret`, `bearer`, `oauth_client`, `oauth`, `both` (= `path_secret` +
+`bearer`, kept for compatibility), or a mix such as `path_secret,oauth_client`.
 
 | Mode | Endpoint | Failure |
 |---|---|---|
 | `path_secret` | `/mcp/<secret>` | 404 |
 | `bearer` | `/mcp` with `Authorization: Bearer <key>` (labelled keys: `MCP_API_KEYS=alice:<key>,bob:<key>`) | 401 |
-| `oauth` | `/mcp` with an OAuth access token from "Sign in with Google" (see below) | 401 + discovery pointer |
+| `oauth_client` | `/mcp` with an OAuth token from claude.ai's **Client ID + Secret** (simplest, no Google; see below) | 401 + discovery pointer |
+| `oauth` | `/mcp` with an OAuth token after each user signs in with Google (per-person access) | 401 + discovery pointer |
 
 The bearer label appears in logs and drives the per-client rate limit; keys are never logged. Rotate or revoke a key by
 editing the variable (Render restarts the service). Rotate the path secret by changing `MCP_PATH_SECRET` and re-adding the
 connector. In oauth mode the connector URL has **no secret in it**.
 
-## OAuth sign-in (claude.ai login instead of a secret URL)
+## OAuth with just a client ID and secret (`oauth_client`, no Google)
+
+This is the same shape as most connectors: you paste a **Client ID** and **Client Secret** into claude.ai's *Advanced
+settings* and the URL has no secret in it. Nothing to create anywhere else; Render generates both values.
+
+1. In `render.yaml` set `MCP_AUTH_MODE` to `path_secret,oauth_client` (keeps your current URL working while you switch), push,
+   and let Render redeploy. `OAUTH_SIGNING_KEY`, `MCP_OAUTH_CLIENT_ID` (`claude-meta-ads`) and `MCP_OAUTH_CLIENT_SECRET`
+   already exist in the Blueprint; `PUBLIC_BASE_URL` falls back to Render's own URL.
+2. In Render > service > **Environment**, copy `MCP_OAUTH_CLIENT_ID` and `MCP_OAUTH_CLIENT_SECRET`.
+3. In claude.ai: Settings > Connectors > **Add custom connector**, URL `https://<service>.onrender.com/mcp`, open
+   **Advanced settings**, paste the Client ID and Client Secret, then **Connect**. It connects without a login page.
+4. Claude Code: open registration is closed in this mode, so Claude Code cannot self-register; it must be given the same
+   client ID and secret. Check `claude mcp add --help` for how your version accepts OAuth client credentials. If it has no
+   such option, keep `path_secret` in `MCP_AUTH_MODE` (`path_secret,oauth_client`) and use the secret URL from Claude Code
+   (`claude mcp add --transport http meta-ads https://<service>.onrender.com/mcp/<MCP_PATH_SECRET>`), or use the Google
+   `oauth` mode, which allows self-registration.
+5. Once everyone is connected through OAuth, change `MCP_AUTH_MODE` to `oauth_client` to switch the secret URL off.
+
+How it stays safe without a login: the **secret is the credential**. `/authorize` approves automatically only for this one
+pre-registered client, and the resulting code can be redeemed only at `/token` with the client secret and the PKCE
+verifier, so opening the authorize link gets nobody anything. Open client registration is turned off, so nobody can
+register their own client. Redirects are still limited to the Claude callbacks and loopback. Access tokens last 1 hour and
+refresh tokens rotate.
+
+**Rotate the secret:** change `MCP_OAUTH_CLIENT_SECRET` in Render and save. All existing tokens stop working immediately
+(they are tied to the secret), and you paste the new secret into the connector's Advanced settings. `OAUTH_SIGNING_KEY`
+rotation does the same.
+
+Trade-offs: everyone who has the secret is one identity, so there are no per-person accounts, no per-person revocation and
+budgets are shared by that identity (the per-minute/hour/day limits apply to the connector as a whole). Use the Google mode
+below when you want individual access control. Whoever you give the secret to can connect, so treat it like a password.
+
+## Optional: Google sign-in (`oauth`, per-person access)
+
+> Not part of the Blueprint or `.env.example`. Only use it if you want individual accounts: add `GOOGLE_OAUTH_CLIENT_ID`,
+> `GOOGLE_OAUTH_CLIENT_SECRET`, `ALLOWED_EMAILS` and/or `ALLOWED_EMAIL_DOMAINS` by hand in Render's Environment tab and set
+> `MCP_AUTH_MODE` to `oauth`. Most teams should use `oauth_client` above.
 
 The server is its own OAuth 2.1 authorization server for Claude, built on the MCP SDK's auth framework (PyJWT for the
 signatures; no hand-rolled crypto). Users sign in with Google and only allowed emails get through.
@@ -325,6 +362,9 @@ the installed source, because the docs site excerpts did not cover the HTTP opti
 - **Claude.ai static headers:** per your note, not confirmed.
 
 ### OAuth: unverified assumptions
+
+- **`oauth_client` mode:** that claude.ai's Advanced settings send the pasted client ID and secret via `client_secret_post` or
+  Basic (both work), and whether Claude Code can be given a client ID and secret (I did not verify any flag for it). Not run against a real client.
 
 Verified: Claude's connector authentication page (callback URLs, S256 PKCE, DCR, `401` + `resource_metadata`, refresh
 rotation, 10 s endpoint limit, loopback redirects), the MCP authorization spec (RFC 9728/8414/7591/8707 requirements),

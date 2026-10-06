@@ -36,7 +36,7 @@ class OAuthRuntime:
     settings: Settings
     codec: TokenCodec
     provider: OAuthProvider
-    google: GoogleClient
+    google: GoogleClient | None = None
 
     @property
     def callback_url(self) -> str:

@@ -25,11 +25,11 @@ def build_server(svc: Service, oauth=None) -> MCPServer:
                 issuer_url=base, resource_server_url=f"{base}/mcp", validate_token_resource=True,
                 required_scopes=[SCOPE],
                 client_registration_options=ClientRegistrationOptions(
-                    enabled=True, valid_scopes=VALID_SCOPES, default_scopes=[SCOPE]),
+                    enabled=oauth.settings.oauth_login, valid_scopes=VALID_SCOPES, default_scopes=[SCOPE]),
             ),
         }
     mcp = MCPServer("meta-ads-library", **kwargs)
-    if oauth is not None:
+    if oauth is not None and oauth.settings.oauth_login:
         from .oauth.routes import register_oauth_routes
 
         register_oauth_routes(mcp, oauth)

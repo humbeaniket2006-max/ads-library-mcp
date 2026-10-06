@@ -22,9 +22,9 @@ services:
       - key: META_MOCK
         value: "true"            # first deploy works before Meta approves identity; set to false to go live
       - key: MCP_AUTH_MODE
-        # path_secret | bearer | oauth | both (= path_secret+bearer) | a comma list such as "path_secret,oauth".
-        # To use OAuth: fill the Google/allowlist values below, then change this line to `path_secret,oauth`
-        # (or `oauth` once everyone has switched) and push. The app refuses to start in oauth mode with missing values.
+        # path_secret | bearer | oauth | oauth_client | both (= path_secret+bearer) | a comma list.
+        # OAuth with a client ID + secret: `path_secret,oauth_client`, then `oauth_client` once switched. Needs no extra
+        # values: paste MCP_OAUTH_CLIENT_ID / MCP_OAUTH_CLIENT_SECRET into claude.ai > Advanced settings.
         value: path_secret
       - key: LOG_LEVEL
         value: INFO
@@ -73,22 +73,14 @@ services:
         sync: false              # leave blank while META_MOCK=true
       - key: MCP_API_KEYS
         sync: false              # optional; LABEL:KEY,LABEL2:KEY2 (only used with bearer/both modes)
-      # --- OAuth sign-in with Google (used only when MCP_AUTH_MODE includes oauth) ---
+      # --- OAuth client ID + secret (MCP_AUTH_MODE=oauth_client) ---
       # PUBLIC_BASE_URL is not set here: the app uses Render's RENDER_EXTERNAL_URL (override with PUBLIC_BASE_URL).
       - key: OAUTH_SIGNING_KEY       # signs client IDs, codes and tokens. Rotating it signs everyone out.
         generateValue: true
-      - key: MCP_OAUTH_CLIENT_ID     # static client for claude.ai > Advanced settings (not secret)
+      - key: MCP_OAUTH_CLIENT_ID     # the client ID you paste into claude.ai > Advanced settings (not secret)
         value: claude-meta-ads
       - key: MCP_OAUTH_CLIENT_SECRET
         generateValue: true
-      - key: GOOGLE_OAUTH_CLIENT_ID
-        sync: false
-      - key: GOOGLE_OAUTH_CLIENT_SECRET
-        sync: false
-      - key: ALLOWED_EMAILS          # comma-separated full addresses; kept out of git on purpose
-        sync: false
-      - key: ALLOWED_EMAIL_DOMAINS   # comma-separated domains, e.g. example.com
-        sync: false
       - key: OAUTH_ACCESS_TOKEN_TTL  # seconds
         value: "3600"
       - key: OAUTH_REFRESH_TOKEN_TTL

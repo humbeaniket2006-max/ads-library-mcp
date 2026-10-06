@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 
 DEFAULT_GRAPH_VERSION = "v26.0"
 MIN_SECRET_LEN = 32
-AUTH_MODES = ("path_secret", "bearer", "oauth")
+AUTH_MODES = ("path_secret", "bearer", "oauth", "oauth_client")
 
 
 def parse_auth_modes(raw: str) -> frozenset[str]:
-    """MCP_AUTH_MODE: path_secret | bearer | oauth | both (= path_secret+bearer) or a comma-separated combination."""
+    """MCP_AUTH_MODE: path_secret | bearer | oauth | oauth_client | both (= path_secret+bearer) or a comma list."""
     modes: set[str] = set()
     for part in [p.strip().lower() for p in raw.split(",") if p.strip()]:
         if part == "both":
@@ -19,7 +19,7 @@ def parse_auth_modes(raw: str) -> frozenset[str]:
         elif part in AUTH_MODES:
             modes.add(part)
         else:
-            raise ConfigError("MCP_AUTH_MODE must be path_secret, bearer, oauth, both, or a comma-separated mix.")
+            raise ConfigError("MCP_AUTH_MODE must be path_secret, bearer, oauth, oauth_client, both, or a comma list.")
     if not modes:
         raise ConfigError("MCP_AUTH_MODE must not be empty.")
     return frozenset(modes)
@@ -153,6 +153,20 @@ class Settings:
     log_level: str = "INFO"
 
     @property
+    def oauth_enabled(self) -> bool:
+        return bool({"oauth", "oauth_client"} & self.auth_modes)
+
+    @property
+    def oauth_login(self) -> bool:
+        """Users sign in with Google (and DCR is open to Claude)."""
+        return "oauth" in self.auth_modes
+
+    @property
+    def oauth_client_login(self) -> bool:
+        """The pre-registered client is approved automatically; its secret is the only credential."""
+        return "oauth_client" in self.auth_modes
+
+    @property
     def secrets(self) -> list[str]:
         vals = [self.meta_access_token, self.path_secret, self.cursor_signing_key, self.google_client_secret,
                 self.oauth_signing_key, self.oauth_client_secret, *self.api_keys.values()]
@@ -252,19 +266,19 @@ class Settings:
 
 
 def _load_oauth(env: dict[str, str], modes: frozenset[str]) -> dict:
-    """Validate OAuth settings. Required and strict when 'oauth' is enabled; ignored otherwise."""
+    """Validate OAuth settings. Required and strict when an oauth mode is enabled; ignored otherwise.
+
+    oauth        = users sign in with Google, checked against an allowlist; Dynamic Client Registration is open.
+    oauth_client = no user login: the pre-registered client (ID + secret) is the credential; DCR is closed.
+    """
     out: dict = {}
-    if "oauth" not in modes:
+    login, client_mode = "oauth" in modes, "oauth_client" in modes
+    if not (login or client_mode):
         return {"public_base_url": ""}
     base = env.get("PUBLIC_BASE_URL", "").strip() or env.get("RENDER_EXTERNAL_URL", "").strip()
     if not base:
         raise ConfigError("PUBLIC_BASE_URL (or Render's RENDER_EXTERNAL_URL) is required for oauth.")
     out["public_base_url"] = _base_url(base)
-
-    gid, gsecret = env.get("GOOGLE_OAUTH_CLIENT_ID", "").strip(), env.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
-    if not gid or not gsecret:
-        raise ConfigError("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are required for oauth.")
-    out["google_client_id"], out["google_client_secret"] = gid, gsecret
 
     key = env.get("OAUTH_SIGNING_KEY", "").strip()
     if len(key) < MIN_SECRET_LEN:
@@ -272,22 +286,27 @@ def _load_oauth(env: dict[str, str], modes: frozenset[str]) -> dict:
     out["oauth_signing_key"] = key
 
     cid, csecret = env.get("MCP_OAUTH_CLIENT_ID", "").strip(), env.get("MCP_OAUTH_CLIENT_SECRET", "").strip()
-    if bool(cid) != bool(csecret):
-        raise ConfigError("MCP_OAUTH_CLIENT_ID and MCP_OAUTH_CLIENT_SECRET must be set together (or both empty).")
+    if (client_mode or cid or csecret) and (not cid or not csecret):
+        raise ConfigError("MCP_OAUTH_CLIENT_ID and MCP_OAUTH_CLIENT_SECRET must be set together.")
     if csecret and len(csecret) < MIN_SECRET_LEN:
         raise ConfigError(f"MCP_OAUTH_CLIENT_SECRET must be at least {MIN_SECRET_LEN} characters.")
     if cid and not re.fullmatch(r"[A-Za-z0-9._~\-]{3,100}", cid):
         raise ConfigError("MCP_OAUTH_CLIENT_ID may only contain letters, digits and . _ ~ -")
     out["oauth_client_id"], out["oauth_client_secret"] = cid, csecret
 
-    emails, domains = _list(env, "ALLOWED_EMAILS"), _list(env, "ALLOWED_EMAIL_DOMAINS")
-    if not emails and not domains:  # deny by default
-        raise ConfigError("Set ALLOWED_EMAILS and/or ALLOWED_EMAIL_DOMAINS; oauth denies everyone by default.")
-    if any("@" not in e or e.startswith("@") or e.endswith("@") for e in emails):
-        raise ConfigError("ALLOWED_EMAILS entries must be full email addresses.")
-    if any("@" in d or "." not in d for d in domains):
-        raise ConfigError("ALLOWED_EMAIL_DOMAINS entries must be bare domains like example.com.")
-    out["allowed_emails"], out["allowed_email_domains"] = emails, domains
+    if login:
+        gid, gsecret = env.get("GOOGLE_OAUTH_CLIENT_ID", "").strip(), env.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+        if not gid or not gsecret:
+            raise ConfigError("GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET are required for oauth.")
+        out["google_client_id"], out["google_client_secret"] = gid, gsecret
+        emails, domains = _list(env, "ALLOWED_EMAILS"), _list(env, "ALLOWED_EMAIL_DOMAINS")
+        if not emails and not domains:  # deny by default
+            raise ConfigError("Set ALLOWED_EMAILS and/or ALLOWED_EMAIL_DOMAINS; oauth denies everyone by default.")
+        if any("@" not in e or e.startswith("@") or e.endswith("@") for e in emails):
+            raise ConfigError("ALLOWED_EMAILS entries must be full email addresses.")
+        if any("@" in d or "." not in d for d in domains):
+            raise ConfigError("ALLOWED_EMAIL_DOMAINS entries must be bare domains like example.com.")
+        out["allowed_emails"], out["allowed_email_domains"] = emails, domains
 
     access = _int(env, "OAUTH_ACCESS_TOKEN_TTL", 3600, 60, 86400)
     refresh = _int(env, "OAUTH_REFRESH_TOKEN_TTL", 30 * 86400, 3600, 90 * 86400)
