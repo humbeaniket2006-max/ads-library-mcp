@@ -9,7 +9,7 @@ import yaml
 from app.config import Settings
 
 ROOT = Path(__file__).resolve().parent.parent
-PLATFORM_PROVIDED = {"RENDER_EXTERNAL_HOSTNAME", "PORT"}
+PLATFORM_PROVIDED = {"RENDER_EXTERNAL_HOSTNAME", "RENDER_EXTERNAL_URL", "PORT"}
 # Everything in the spec's Config section must be declared in the Blueprint.
 SPEC_CONFIG = """META_ACCESS_TOKEN GRAPH_API_VERSION META_MOCK MCP_AUTH_MODE MCP_PATH_SECRET MCP_API_KEYS CURSOR_SIGNING_KEY
 META_MAX_CALLS_PER_HOUR META_MAX_CALLS_PER_DAY CLIENT_MAX_CALLS_PER_MINUTE CACHE_TTL_ACTIVE CACHE_TTL_HISTORICAL
@@ -96,3 +96,41 @@ def test_every_required_env_var_is_declared_and_app_boots_from_blueprint(svc):
 def test_requirements_pinned():
     for line in (ROOT / "requirements.txt").read_text().split():
         assert re.fullmatch(r"[A-Za-z0-9_.\-]+==\d+(\.\d+)*", line), line
+
+
+def test_oauth_vars_declared_without_hardcoded_secrets(svc):
+    env = {e["key"]: e for e in svc["envVars"]}
+    for key in ("OAUTH_SIGNING_KEY", "MCP_OAUTH_CLIENT_SECRET"):
+        assert env[key] == {"key": key, "generateValue": True}
+    for key in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "ALLOWED_EMAILS", "ALLOWED_EMAIL_DOMAINS"):
+        assert env[key] == {"key": key, "sync": False}  # personal data and secrets never live in git
+    assert "value" in env["MCP_OAUTH_CLIENT_ID"] and "GOCSPX" not in (ROOT / "render.yaml").read_text()
+    assert env["MCP_AUTH_MODE"]["value"] == "path_secret"  # existing deploys keep working until you opt in
+    assert "PUBLIC_BASE_URL" not in env  # derived from RENDER_EXTERNAL_URL
+
+
+def test_blueprint_boots_in_oauth_mode_and_declares_every_required_var(svc):
+    env = {"RENDER_EXTERNAL_HOSTNAME": "svc.onrender.com", "RENDER_EXTERNAL_URL": "https://svc.onrender.com"}
+    for e in svc["envVars"]:
+        if "value" in e:
+            env[e["key"]] = e["value"]
+        elif e.get("generateValue"):
+            env[e["key"]] = base64.b64encode(secrets.token_bytes(32)).decode()
+    env["MCP_AUTH_MODE"] = "path_secret,oauth"
+    # what the owner enters for the sync:false variables when switching OAuth on
+    env.update(GOOGLE_OAUTH_CLIENT_ID="x.apps.googleusercontent.com", GOOGLE_OAUTH_CLIENT_SECRET="GOCSPX-" + "a" * 28,
+               ALLOWED_EMAILS="me@example.com")
+    s = Settings.load(env)
+    assert "oauth" in s.auth_modes and s.public_base_url == "https://svc.onrender.com"
+    assert "svc.onrender.com" in s.allowed_hosts
+
+    required = set()
+    for key in list(env):
+        trial = {k: v for k, v in env.items() if k != key}
+        try:
+            Settings.load(trial)
+        except Exception:
+            required.add(key)
+    declared = {e["key"] for e in svc["envVars"]} | PLATFORM_PROVIDED
+    assert required <= declared, required - declared
+    assert {"OAUTH_SIGNING_KEY", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"} <= required

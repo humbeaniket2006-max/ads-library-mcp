@@ -10,8 +10,29 @@ from pydantic import Field
 from .service import Service, ToolFailure
 
 
-def build_server(svc: Service) -> MCPServer:
-    mcp = MCPServer("meta-ads-library")
+def build_server(svc: Service, oauth=None) -> MCPServer:
+    """oauth: an OAuthRuntime when MCP_AUTH_MODE includes oauth (adds /authorize, /token, /register, metadata)."""
+    kwargs = {}
+    if oauth is not None:
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+
+        from .oauth.policy import SCOPE, VALID_SCOPES
+
+        base = oauth.settings.public_base_url
+        kwargs = {
+            "auth_server_provider": oauth.provider,
+            "auth": AuthSettings(
+                issuer_url=base, resource_server_url=f"{base}/mcp", validate_token_resource=True,
+                required_scopes=[SCOPE],
+                client_registration_options=ClientRegistrationOptions(
+                    enabled=True, valid_scopes=VALID_SCOPES, default_scopes=[SCOPE]),
+            ),
+        }
+    mcp = MCPServer("meta-ads-library", **kwargs)
+    if oauth is not None:
+        from .oauth.routes import register_oauth_routes
+
+        register_oauth_routes(mcp, oauth)
 
     @mcp.tool(structured_output=False)
     async def search_ads(

@@ -108,8 +108,12 @@ class MemoryBudget:
         client_per_minute: int,
         cold_factor: float = 0.5,
         clock: Clock = time.monotonic,
+        client_per_hour: int | None = None,
+        client_per_day: int | None = None,
     ):
         self.per_hour, self.per_day, self.per_min = per_hour, per_day, client_per_minute
+        self.client_per_hour, self.client_per_day = client_per_hour, client_per_day
+        self._client_hist: dict[str, deque[float]] = {}  # per-client call times (last 24 h)
         self.cold_factor = cold_factor
         self._clock = clock
         self._started = clock()
@@ -122,6 +126,9 @@ class MemoryBudget:
             self._hour.popleft()
         while self._day and now - self._day[0] >= 86400:
             self._day.popleft()
+
+    def _factor(self, now: float, window: int) -> float:
+        return self.cold_factor if now - self._started < window else 1.0
 
     def _caps(self, now: float, throttle: bool) -> tuple[int, int]:
         up = now - self._started
@@ -140,14 +147,28 @@ class MemoryBudget:
                 raise BudgetExhausted("hourly", 3600 - (now - self._hour[0]))
             if len(self._day) >= day_cap:
                 raise BudgetExhausted("daily", 86400 - (now - self._day[0]))
+            hist = self._client_hist.setdefault(client, deque())
+            while hist and now - hist[0] >= 86400:
+                hist.popleft()
+            day_cap = None
+            if self.client_per_day is not None:
+                day_cap = max(1, int(self.client_per_day * self._factor(now, 86400)))
+            if day_cap is not None and len(hist) >= day_cap:
+                raise BudgetExhausted("per-user-daily", 86400 - (now - hist[0]))
+            if self.client_per_hour is not None:
+                recent = [t for t in hist if now - t < 3600]
+                if len(recent) >= max(1, int(self.client_per_hour * self._factor(now, 3600))):
+                    raise BudgetExhausted("per-user-hourly", 3600 - (now - recent[0]))
             tokens, last = self._buckets.get(client, (float(self.per_min), now))
             rate = self.per_min / 60.0
             tokens = min(float(self.per_min), tokens + (now - last) * rate)
             if tokens < 1:
                 raise BudgetExhausted("per-client", (1 - tokens) / rate)
             self._buckets[client] = (tokens - 1, now)
+            hist.append(now)
             if len(self._buckets) > 1000:  # bound memory under many distinct IPs
                 self._buckets = dict(list(self._buckets.items())[-500:])
+                self._client_hist = {k: v for k, v in self._client_hist.items() if k in self._buckets}
             self._hour.append(now)
             self._day.append(now)
         except BudgetExhausted:

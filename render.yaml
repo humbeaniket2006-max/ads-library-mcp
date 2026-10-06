@@ -22,6 +22,9 @@ services:
       - key: META_MOCK
         value: "true"            # first deploy works before Meta approves identity; set to false to go live
       - key: MCP_AUTH_MODE
+        # path_secret | bearer | oauth | both (= path_secret+bearer) | a comma list such as "path_secret,oauth".
+        # To use OAuth: fill the Google/allowlist values below, then change this line to `path_secret,oauth`
+        # (or `oauth` once everyone has switched) and push. The app refuses to start in oauth mode with missing values.
         value: path_secret
       - key: LOG_LEVEL
         value: INFO
@@ -32,6 +35,10 @@ services:
         value: "500"
       - key: CLIENT_MAX_CALLS_PER_MINUTE
         value: "10"
+      - key: CLIENT_MAX_CALLS_PER_HOUR   # per key label, signed-in user (hashed email) or IP
+        value: "30"
+      - key: CLIENT_MAX_CALLS_PER_DAY
+        value: "200"
       # --- cache (seconds / counts / bytes) ---
       - key: CACHE_TTL_ACTIVE
         value: "900"
@@ -66,4 +73,26 @@ services:
         sync: false              # leave blank while META_MOCK=true
       - key: MCP_API_KEYS
         sync: false              # optional; LABEL:KEY,LABEL2:KEY2 (only used with bearer/both modes)
+      # --- OAuth sign-in with Google (used only when MCP_AUTH_MODE includes oauth) ---
+      # PUBLIC_BASE_URL is not set here: the app uses Render's RENDER_EXTERNAL_URL (override with PUBLIC_BASE_URL).
+      - key: OAUTH_SIGNING_KEY       # signs client IDs, codes and tokens. Rotating it signs everyone out.
+        generateValue: true
+      - key: MCP_OAUTH_CLIENT_ID     # static client for claude.ai > Advanced settings (not secret)
+        value: claude-meta-ads
+      - key: MCP_OAUTH_CLIENT_SECRET
+        generateValue: true
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: ALLOWED_EMAILS          # comma-separated full addresses; kept out of git on purpose
+        sync: false
+      - key: ALLOWED_EMAIL_DOMAINS   # comma-separated domains, e.g. example.com
+        sync: false
+      - key: OAUTH_ACCESS_TOKEN_TTL  # seconds
+        value: "3600"
+      - key: OAUTH_REFRESH_TOKEN_TTL
+        value: "2592000"
+      - key: OAUTH_CODE_TTL
+        value: "60"
       # ALLOWED_HOSTS is not set here: the app adds Render's RENDER_EXTERNAL_HOSTNAME automatically.

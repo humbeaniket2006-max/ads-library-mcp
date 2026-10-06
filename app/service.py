@@ -51,6 +51,7 @@ class Service:
         self.budget = budget or MemoryBudget(
             settings.max_calls_per_hour, settings.max_calls_per_day,
             settings.client_max_calls_per_minute, settings.cold_start_budget_factor,
+            client_per_hour=settings.client_max_calls_per_hour, client_per_day=settings.client_max_calls_per_day,
         )
         self.meta = meta or MetaClient(settings, self.cache, self.budget)
         self.started = time.monotonic()

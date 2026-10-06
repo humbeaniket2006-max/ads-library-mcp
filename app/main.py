@@ -4,8 +4,12 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import time
 import uuid
+from base64 import b64decode
+from collections import deque
 from typing import Any
+from urllib.parse import parse_qsl, unquote, urlencode
 
 from . import context
 from .auth import Authenticator, StaticAuthenticator
@@ -24,13 +28,40 @@ SECURITY_HEADERS = [
 ]
 
 
-class Gateway:
-    """Pure-ASGI front door: health, host check, auth, body limit, unknown-param rejection."""
+OAUTH_PATHS = frozenset({
+    "/authorize", "/token", "/register", "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource/mcp", "/oauth/consent", "/oauth/google/callback",
+})
 
-    def __init__(self, inner: Any, settings: Settings, auth: Authenticator | None = None):
-        self.inner, self.s = inner, settings
+
+class RateWindow:
+    """Small per-key sliding window limiter (used per client IP on the unauthenticated OAuth endpoints)."""
+
+    def __init__(self, limit: int, seconds: int, clock=time.monotonic):
+        self.limit, self.seconds, self._clock = limit, seconds, clock
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = self._clock()
+        q = self._hits.setdefault(key, deque())
+        while q and now - q[0] >= self.seconds:
+            q.popleft()
+        if len(q) >= self.limit:
+            return False
+        q.append(now)
+        if len(self._hits) > 2000:
+            self._hits = {k: v for k, v in self._hits.items() if v and now - v[-1] < self.seconds}
+        return True
+
+
+class Gateway:
+    """Pure-ASGI front door: health, host check, auth, body limit, unknown-param rejection, OAuth routing."""
+
+    def __init__(self, inner: Any, settings: Settings, auth: Authenticator | None = None, oauth: Any = None):
+        self.inner, self.s, self.oauth = inner, settings, oauth
         self.auth = auth or StaticAuthenticator(settings)
         self.hosts = {h.lower() for h in settings.allowed_hosts}
+        self._oauth_limit = RateWindow(60, 60)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
@@ -43,9 +74,9 @@ class Gateway:
             nonlocal started
             if msg["type"] == "http.response.start":
                 started = True
-                present = {k.lower() for k, _ in msg.get("headers", [])}
-                msg = {**msg, "headers": [*msg.get("headers", []),
-                                          *[h for h in SECURITY_HEADERS if h[0] not in present]]}
+                kept = [(k, v) for k, v in msg.get("headers", []) if not k.lower().startswith(b"access-control-")]
+                present = {k.lower() for k, _ in kept}  # no CORS: the SDK's wildcard CORS headers are dropped
+                msg = {**msg, "headers": [*kept, *[h for h in SECURITY_HEADERS if h[0] not in present]]}
             await send(msg)
 
         try:
@@ -81,27 +112,57 @@ class Gateway:
         if hostname not in self.hosts and host not in self.hosts:
             return await self._json(send, 421, {"error": "misdirected request"})
 
-        res = self.auth.authenticate(path, headers.get(b"authorization", b"").decode("latin-1") or None)
         ip = self._ip(scope, headers)
+        oauth_on = self.oauth is not None
+        context.request_id.set(uuid.uuid4().hex[:12])
+
+        if oauth_on and path in OAUTH_PATHS:  # unauthenticated by design: discovery, DCR, authorize, token, callbacks
+            if not self._oauth_limit.allow(ip):
+                return await self._json(send, 429, {"error": "too many requests"}, [(b"retry-after", b"60")])
+            body = await self._read_body(headers, receive)
+            if body is None:
+                return await self._json(send, 413, {"error": "request too large"})
+            if path == "/token":
+                scope, body = self._basic_to_form(scope, headers, body)
+            return await self.inner(scope, self._replay(body, receive), send)
+
+        authz = headers.get(b"authorization", b"").decode("latin-1") or None
+        res = self.auth.authenticate(path, authz)
+        passthrough = False
         if not res.ok:
-            log_event("auth failed", logging.WARNING, status=res.status, ip=ip)
-            extra = [(b"www-authenticate", b"Bearer")] if res.status == 401 else None
-            body = {"error": "unauthorized"} if res.status == 401 else {"error": "not found"}
-            return await self._json(send, res.status, body, extra)
+            if oauth_on and path in ("/mcp", "/mcp/"):
+                passthrough = True  # the SDK validates OAuth bearer tokens and issues the 401 + discovery pointer
+            else:
+                log_event("auth failed", logging.WARNING, status=res.status, ip=ip)
+                extra = [(b"www-authenticate", b"Bearer")] if res.status == 401 else None
+                body = {"error": "unauthorized"} if res.status == 401 else {"error": "not found"}
+                return await self._json(send, res.status, body, extra)
 
         body = await self._read_body(headers, receive)
         if body is None:
             return await self._json(send, 413, {"error": "request too large"})
-        bad = self._unknown_params(body)
-        if bad is not None:
-            return await self._json(send, 200, bad)
-
+        if not passthrough or authz:
+            bad = self._unknown_params(body)
+            if bad is not None:
+                return await self._json(send, 200, bad)
         if self._is_tool_call(body):
             send = self._shorten_sdk_errors(send)
-        label = res.label or "path"
-        context.client_label.set(label)
-        context.client_key.set(res.label or f"ip:{ip}")
-        context.request_id.set(uuid.uuid4().hex[:12])
+
+        inner_scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}  # never pass the secret inward
+        if passthrough:
+            context.client_label.set("anonymous")
+            context.client_key.set(f"ip:{ip}")  # replaced by the user's identity once the SDK verifies the token
+        else:
+            context.client_label.set(res.label or "path")
+            context.client_key.set(res.label or f"ip:{ip}")
+            if oauth_on:  # the SDK now requires a token on /mcp; vouch for this already-authenticated request
+                hdrs = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"authorization"]
+                hdrs.append((b"authorization", b"Bearer " + self.oauth.provider.gateway_token.encode()))
+                inner_scope["headers"] = hdrs
+        await self.inner(inner_scope, self._replay(body, receive), send)
+
+    @staticmethod
+    def _replay(body: bytes, receive):
         sent = False
 
         async def replay():
@@ -111,8 +172,30 @@ class Gateway:
                 return {"type": "http.request", "body": body, "more_body": False}
             return await receive()
 
-        inner_scope = {**scope, "path": "/mcp", "raw_path": b"/mcp"}  # never pass the secret inward
-        await self.inner(inner_scope, replay, send)
+        return replay
+
+    @staticmethod
+    def _basic_to_form(scope, headers: dict[bytes, bytes], body: bytes):
+        """Some clients send client_secret_basic. The SDK reads the secret per the client's registered method, so
+        fold HTTP Basic credentials into the form body (and drop the header) before it sees the request."""
+        value = headers.get(b"authorization", b"").decode("latin-1")
+        ctype = headers.get(b"content-type", b"").decode("latin-1").lower()
+        if not value.lower().startswith("basic ") or not ctype.startswith("application/x-www-form-urlencoded"):
+            return scope, body
+        try:
+            cid, _, secret = b64decode(value[6:].strip(), validate=True).decode().partition(":")
+        except ValueError:
+            return scope, body
+        params = parse_qsl(body.decode("latin-1"), keep_blank_values=True)
+        keys = {k for k, _ in params}
+        if "client_id" not in keys:
+            params.append(("client_id", unquote(cid)))
+        if "client_secret" not in keys and secret:
+            params.append(("client_secret", unquote(secret)))
+        new = urlencode(params).encode()
+        hdrs = [(k, v) for k, v in scope.get("headers", []) if k.lower() not in (b"authorization", b"content-length")]
+        hdrs.append((b"content-length", str(len(new)).encode()))
+        return {**scope, "headers": hdrs}, new
 
     async def _read_body(self, headers, receive) -> bytes | None:
         try:
@@ -211,8 +294,18 @@ def create_app(settings: Settings | None = None) -> Gateway:
     redactor.set_secrets(s.secrets)
     setup_logging(s.log_level)
     svc = Service(s)
-    hosts = [*s.allowed_hosts, *[f"{h}:*" for h in s.allowed_hosts]]
-    inner = build_server(svc).streamable_http_app(
+    hosts = [*s.allowed_hosts, *[f"{h}:*" for h in s.allowed_hosts if ":" not in h]]
+    oauth = None
+    if "oauth" in s.auth_modes:
+        from .oauth.google import GoogleClient
+        from .oauth.provider import OAuthProvider
+        from .oauth.routes import OAuthRuntime
+        from .oauth.tokens import TokenCodec
+
+        codec = TokenCodec(s.oauth_signing_key, s.public_base_url)
+        google = GoogleClient(s.google_client_id, s.google_client_secret)
+        oauth = OAuthRuntime(s, codec, OAuthProvider(s, codec), google)
+    inner = build_server(svc, oauth).streamable_http_app(
         stateless_http=True, json_response=True, streamable_http_path="/mcp",
         max_request_body_size=MAX_BODY,
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts),
@@ -220,7 +313,7 @@ def create_app(settings: Settings | None = None) -> Gateway:
     if s.meta_mock:
         log_event("META_MOCK=true: serving fixtures, no calls to Meta", logging.WARNING)
     log_event("cold start, cache and budgets reset")
-    gw = Gateway(inner, s)
+    gw = Gateway(inner, s, oauth=oauth)
     gw.service = svc  # exposed for tests
     return gw
 

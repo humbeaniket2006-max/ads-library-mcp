@@ -10,6 +10,17 @@ import time
 _TOKEN_PARAM = re.compile(r"(access_token=)[^&\s\"')]+", re.I)
 _TOKEN_JSON = re.compile(r"(\"?access_token\"?\s*[:=]\s*\"?)[^\"&\s,}]+", re.I)
 _EAA = re.compile(r"\bEAA[A-Za-z0-9_\-]{6,}")
+# OAuth: JWTs (our access/refresh/code/state tokens and Google ID tokens), Google token shapes, and
+# secret-bearing form/query parameters and JSON keys.
+_JWT = re.compile(r"\beyJ[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]*")
+_GOOGLE = re.compile(r"\b(?:ya29\.[A-Za-z0-9_\-]{10,}|GOCSPX-[A-Za-z0-9_\-]{8,}|1//[A-Za-z0-9_\-]{20,})")
+_OAUTH_PARAM = re.compile(
+    r"([?&\s](?:code|state|refresh_token|id_token|client_secret|code_verifier|assertion|req)=)[^&\s\"')]+", re.I
+)
+_OAUTH_JSON = re.compile(
+    r"(\"?(?:refresh_token|id_token|client_secret|code_verifier|assertion|access_token_value)\"?\s*[:=]\s*\"?)[^\"&\s,}]+",
+    re.I,
+)
 _BEARER = re.compile(r"(bearer\s+)[A-Za-z0-9._~+/=\-]{8,}", re.I)
 _MASK = "[redacted]"
 
@@ -32,6 +43,10 @@ class Redactor:
         s = _TOKEN_PARAM.sub(r"\1" + _MASK, s)
         s = _TOKEN_JSON.sub(r"\1" + _MASK, s)
         s = _EAA.sub(_MASK, s)
+        s = _JWT.sub(_MASK, s)
+        s = _GOOGLE.sub(_MASK, s)
+        s = _OAUTH_PARAM.sub(r"\1" + _MASK, s)
+        s = _OAUTH_JSON.sub(r"\1" + _MASK, s)
         return _BEARER.sub(r"\1" + _MASK, s)
 
 

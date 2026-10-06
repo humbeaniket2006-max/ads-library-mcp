@@ -199,6 +199,8 @@ class MetaClient:
                 "hourly": "The hourly Meta call budget is used up",
                 "daily": "The daily Meta call budget is used up",
                 "per-client": "Your per-minute call limit is reached",
+                "per-user-hourly": "Your hourly call limit is reached",
+                "per-user-daily": "Your daily call limit is reached",
             }.get(exc.scope, "Meta call budget state is unavailable")
             raise MetaError(stop_msg(what, exc.retry_after), exc.retry_after) from None
 

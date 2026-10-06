@@ -25,10 +25,12 @@ def _eq(a: str, b: str) -> bool:
 
 
 class StaticAuthenticator:
-    """path_secret: /mcp/<secret>.  bearer: /mcp with 'Authorization: Bearer <key>' (labelled keys)."""
+    """Static credentials. path_secret: /mcp/<secret>.  bearer: /mcp with 'Authorization: Bearer <key>' (labelled keys).
+
+    OAuth is a separate mechanism handled by the MCP SDK behind the gateway (see app/oauth)."""
 
     def __init__(self, s: Settings):
-        self.mode, self.secret, self.keys = s.auth_mode, s.path_secret, dict(s.api_keys)
+        self.modes, self.secret, self.keys = s.auth_modes, s.path_secret, dict(s.api_keys)
 
     def _bearer(self, authorization: str | None) -> AuthResult:
         scheme, _, token = (authorization or "").partition(" ")
@@ -42,9 +44,9 @@ class StaticAuthenticator:
 
     def authenticate(self, path: str, authorization: str | None) -> AuthResult:
         if path == "/mcp" or path == "/mcp/":
-            if self.mode in ("bearer", "both"):
+            if "bearer" in self.modes:
                 return self._bearer(authorization)
             return AuthResult(False, 404)
-        if path.startswith("/mcp/") and self.mode in ("path_secret", "both") and _eq(path[len("/mcp/"):], self.secret):
+        if path.startswith("/mcp/") and "path_secret" in self.modes and _eq(path[len("/mcp/"):], self.secret):
             return AuthResult(True, 200, None, "path")
         return AuthResult(False, 404)

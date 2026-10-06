@@ -10,7 +10,7 @@ secret URL path or labelled bearer keys. The server is read-only and only ever c
 - **Auth on every MCP route** (`MCP_AUTH_MODE`): path secret (404 on mismatch), bearer keys with labels (401), or both.
   `hmac.compare_digest` throughout; the bearer check does the same work for every configured key. Startup is refused if a
   secret is missing, shorter than 32 characters, or has unsafe characters. The secret is stripped from the path before the
-  MCP layer sees it. OAuth is not implemented (phase 2); auth is an interface (`app/auth.py`).
+  MCP layer sees it. Static credentials live behind an interface (`app/auth.py`); OAuth is a separate mode (below).
 - **Secrets only from environment.** `.env` is git-ignored; `.env.example` has no values. A redaction layer masks
   `access_token=` values, strings starting `EAA`, bearer tokens and every configured secret in log lines (message, fields,
   exception text) and in error text. uvicorn's access log is disabled because the path contains the secret.
@@ -32,6 +32,31 @@ secret URL path or labelled bearer keys. The server is read-only and only ever c
 - **Logging:** structured JSON with request id, client label, tool, status, latency, cache hit/miss, Meta calls used, and a
   hash of the query text. No ad content, tokens or query text.
 - **Supply chain:** all dependencies pinned; `pip-audit` runs in CI.
+
+## OAuth mode (`MCP_AUTH_MODE` includes `oauth`)
+
+- **Built on the MCP SDK's authorization-server framework** with PyJWT (HS256, a derived key and `typ` per purpose, so a
+  refresh token can never be used as an access token, and so on). No hand-rolled crypto.
+- **PKCE S256 required**; redirect URIs are matched exactly against a fixed allowlist (the two Claude callbacks, plus
+  `http://localhost` / `http://127.0.0.1` loopback, port ignored) at registration, at authorize, and again at the callback.
+  Unregistered redirect URIs never receive a redirect.
+- **Tokens are audience-bound** to `<PUBLIC_BASE_URL>/mcp` and issuer-bound; wrong audience, issuer, key, purpose or expiry is
+  a 401. The user's allowlist entry is re-checked on every request and every refresh.
+- **Sign-in:** Google ID token verified for RS256 signature (Google's JWKS), issuer, audience, expiry (60 s allowance),
+  nonce and `email_verified`. Allowlist: exact email, or domain plus a matching `hd` claim. **Deny by default.**
+- **CSRF / confused deputy:** every authorization shows a consent page that names the client and the redirect host; the
+  flow is bound to the browser by an HttpOnly, SameSite=Lax cookie checked at the consent POST (CSRF value) and again at the
+  Google callback (state binding), alongside a signed `state`, a nonce, and short expiries. A callback replayed in another
+  browser is rejected.
+- **Redaction** covers JWTs, Google token shapes, OAuth query/form parameters (`code`, `state`, `id_token`, ...) and every
+  configured OAuth secret; users appear in logs only as a hash.
+- **Network:** only `accounts.google.com`, `oauth2.googleapis.com` and `www.googleapis.com` are contacted for sign-in
+  (hard-coded), 10 s timeout, no redirects, TLS verified. Unauthenticated OAuth endpoints are limited to 60 requests per
+  minute per client IP.
+- **Fail closed:** missing or weak OAuth settings, or empty allowlists, stop startup.
+
+Stateless trade-offs: tokens cannot be revoked individually (remove the user, or rotate `OAUTH_SIGNING_KEY` to sign everyone
+out); single-use tracking for codes and refresh tokens covers only the running instance.
 
 ## Known limitations
 
