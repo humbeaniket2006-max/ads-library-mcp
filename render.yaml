@@ -25,7 +25,7 @@ services:
         # path_secret | bearer | oauth | oauth_client | both (= path_secret+bearer) | a comma list.
         # OAuth with a client ID + secret: `path_secret,oauth_client`, then `oauth_client` once switched. Needs no extra
         # values: paste MCP_OAUTH_CLIENT_ID / MCP_OAUTH_CLIENT_SECRET into claude.ai > Advanced settings.
-        value: path_secret
+        value: path_secret,oauth_client
       - key: LOG_LEVEL
         value: INFO
       # --- Meta call budgets ---

@@ -58,7 +58,7 @@ def test_secrets_are_not_hardcoded(svc):
 
 def test_defaults_and_spec_vars_declared(svc):
     env = {e["key"]: e for e in svc["envVars"]}
-    assert env["META_MOCK"]["value"] == "true" and env["MCP_AUTH_MODE"]["value"] == "path_secret"
+    assert env["META_MOCK"]["value"] == "true" and env["MCP_AUTH_MODE"]["value"] == "path_secret,oauth_client"
     assert env["GRAPH_API_VERSION"]["value"] == "v26.0"
     missing = [k for k in SPEC_CONFIG if k not in env]
     assert not missing, missing
@@ -70,7 +70,8 @@ def test_defaults_and_spec_vars_declared(svc):
 
 def test_every_required_env_var_is_declared_and_app_boots_from_blueprint(svc):
     """Build the env Render would give the app and make sure the app accepts it."""
-    env = {"RENDER_EXTERNAL_HOSTNAME": "meta-ads-library-mcp.onrender.com", "PORT": "10000"}
+    env = {"RENDER_EXTERNAL_HOSTNAME": "meta-ads-library-mcp.onrender.com", "PORT": "10000",
+           "RENDER_EXTERNAL_URL": "https://meta-ads-library-mcp.onrender.com"}
     for e in svc["envVars"]:
         if "value" in e:
             env[e["key"]] = e["value"]
@@ -105,7 +106,7 @@ def test_oauth_vars_declared_without_hardcoded_secrets(svc):
     assert "value" in env["MCP_OAUTH_CLIENT_ID"] and "GOCSPX" not in (ROOT / "render.yaml").read_text()
     for gone in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "ALLOWED_EMAILS", "ALLOWED_EMAIL_DOMAINS"):
         assert gone not in env  # Google sign-in is not part of the Blueprint
-    assert env["MCP_AUTH_MODE"]["value"] == "path_secret"  # existing deploys keep working until you opt in
+    assert env["MCP_AUTH_MODE"]["value"] == "path_secret,oauth_client"  # secret URL stays valid; OAuth added
     assert "PUBLIC_BASE_URL" not in env  # derived from RENDER_EXTERNAL_URL
 
 
