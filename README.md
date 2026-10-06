@@ -84,6 +84,10 @@ pip-audit -r requirements.txt
 `/healthz` returns `{"ok":true}` with no auth and no details. The app adds Render's `RENDER_EXTERNAL_HOSTNAME` to the
 allowed hosts at runtime, so no hostname is hard-coded.
 
+> Render's generated secret is base64 and may contain `+`, `/` or `=`. Paste it into the URL exactly as shown (a raw `/`
+> or a `%2F` both work). If a client mangles it, set your own `MCP_PATH_SECRET` (e.g. `python -c "import secrets;
+> print(secrets.token_urlsafe(32))"`) in the Environment tab.
+>
 > Treat the connector URL as a password. Anyone with it can use the server (and your Meta budget).
 
 ## Free tier limits
@@ -199,7 +203,8 @@ the installed source, because the docs site excerpts did not cover the HTTP opti
 - **Render:**
   - The client-IP header: `True-Client-IP` is from community posts, not official docs. It is configurable via
     `CLIENT_IP_HEADER` and falls back to the socket address.
-  - Whether `generateValue` always yields at least 32 characters: the app refuses to start if not.
+  - `generateValue` output: observed to be base64 (so `+ / =` are accepted in `MCP_PATH_SECRET`); its length is still
+    unconfirmed, and the app refuses to start if it is under 32 characters.
   - Whether a blank `sync: false` entry is accepted at creation.
   - Whether the native Python runtime runs as non-root.
   - The Host header Render's health checker sends: `/healthz` skips the host check for this reason.

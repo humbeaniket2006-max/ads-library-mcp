@@ -10,7 +10,8 @@ from .conftest import KEY_A, make_env, make_settings
 @pytest.mark.parametrize("over", [
     {"MCP_PATH_SECRET": "short"},
     {"MCP_PATH_SECRET": ""},
-    {"MCP_PATH_SECRET": "a/" * 20},
+    {"MCP_PATH_SECRET": "a b" * 20},
+    {"MCP_PATH_SECRET": "a?#" * 20},
     {"CURSOR_SIGNING_KEY": "short"},
     {"MCP_AUTH_MODE": "oauth"},
     {"MCP_AUTH_MODE": "bearer", "MCP_API_KEYS": ""},

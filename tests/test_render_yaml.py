@@ -1,3 +1,4 @@
+import base64
 import re
 import secrets
 from pathlib import Path
@@ -74,7 +75,7 @@ def test_every_required_env_var_is_declared_and_app_boots_from_blueprint(svc):
         if "value" in e:
             env[e["key"]] = e["value"]
         elif e.get("generateValue"):
-            env[e["key"]] = secrets.token_urlsafe(32)
+            env[e["key"]] = base64.b64encode(secrets.token_bytes(32)).decode()  # Render emits base64
         # sync:false vars are left blank, as when a user skips them during mock-mode deploy
     s = Settings.load(env)
     assert s.meta_mock and "meta-ads-library-mcp.onrender.com" in s.allowed_hosts

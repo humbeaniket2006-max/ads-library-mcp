@@ -129,8 +129,9 @@ class Settings:
         if mode in ("path_secret", "both"):
             if len(secret) < MIN_SECRET_LEN:
                 raise ConfigError(f"MCP_PATH_SECRET must be at least {MIN_SECRET_LEN} characters.")
-            if not re.fullmatch(r"[A-Za-z0-9_\-]+", secret):
-                raise ConfigError("MCP_PATH_SECRET may only contain letters, digits, '-' and '_'.")
+            # Render's generateValue emits base64 (letters, digits, + / =), so accept that alphabet too.
+            if not re.fullmatch(r"[A-Za-z0-9_\-+/=.~]+", secret):
+                raise ConfigError("MCP_PATH_SECRET contains unsupported characters.")
         keys = parse_api_keys(env.get("MCP_API_KEYS", ""))
         if mode in ("bearer", "both") and not keys:
             raise ConfigError("MCP_API_KEYS is required for bearer auth.")

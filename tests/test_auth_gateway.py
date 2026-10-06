@@ -139,3 +139,14 @@ async def test_unhandled_error_logging_has_no_secret(capsys):
     await stop(task, done)
     logging.getLogger("x").error("oops")
     assert SECRET not in capsys.readouterr().out
+
+
+async def test_base64_path_secret_as_generated_by_render():
+    secret = "ab+/cd=" * 6  # contains + / = like Render's generateValue output
+    app, task, done = await started(MCP_PATH_SECRET=secret)
+    r = Rpc(app, path=f"/mcp/{secret}")
+    assert await status_of(r) == 200
+    assert await status_of(r, path="/mcp/" + secret.replace("+", "-")) == 404
+    enc = Rpc(app, path="/mcp/" + secret.replace("/", "%2F"))
+    assert await status_of(enc) == 200  # clients that percent-encode the slash also work
+    await stop(task, done, r, enc)
